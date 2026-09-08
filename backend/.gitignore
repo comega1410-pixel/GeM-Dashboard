@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Uploads
+uploads/
+
+# Logs
+*.log
+
+# Prisma migrations (optional — include if you want reproducible migrations)
+# prisma/migrations/
