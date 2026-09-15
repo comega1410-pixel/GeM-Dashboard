@@ -9,6 +9,7 @@ const router = Router();
 router.post('/:bidId/analyze', async (req: Request, res: Response) => {
   try {
     const bidId = req.params.bidId as string;
+    const actorEmail = (req.headers['x-user-email'] as string) || 'officer@gem.gov.in';
 
     const bid = await prisma.bid.findUnique({ where: { id: bidId } });
     if (!bid) {
@@ -19,12 +20,10 @@ router.post('/:bidId/analyze', async (req: Request, res: Response) => {
       return res.status(409).json({ error: 'Analysis already in progress' });
     }
 
-    // Run analysis in background (don't await for response)
-    // But for prototype simplicity, we'll await it
     res.json({ message: 'Analysis started', bidId, status: 'PROCESSING' });
 
-    // Run asynchronously after sending response
-    runComplianceAnalysis(bidId).catch((error) => {
+    // Run asynchronously
+    runComplianceAnalysis(bidId, actorEmail).catch((error) => {
       console.error(`Analysis failed for bid ${bidId}:`, error);
     });
   } catch (error) {
@@ -33,14 +32,14 @@ router.post('/:bidId/analyze', async (req: Request, res: Response) => {
   }
 });
 
-// Get compliance matrix for a bid
+// Get compliance matrix and explainable risk breakdown for a bid
 router.get('/:bidId/compliance', async (req: Request, res: Response) => {
   try {
     const bidId = req.params.bidId as string;
 
     const bid = await prisma.bid.findUnique({
       where: { id: bidId },
-      select: { id: true, title: true, status: true, gemBidNumber: true },
+      select: { id: true, title: true, status: true, gemBidNumber: true, description: true, createdAt: true },
     });
 
     if (!bid) {
@@ -55,6 +54,7 @@ router.get('/:bidId/compliance', async (req: Request, res: Response) => {
           include: {
             document: {
               select: {
+                id: true,
                 originalName: true,
                 docType: true,
               },
@@ -67,18 +67,36 @@ router.get('/:bidId/compliance', async (req: Request, res: Response) => {
       },
     });
 
-    // Compute risk score
-    const riskItems = results.map((r: any) => ({
-      status: r.status,
+    const contradictions = await prisma.contradiction.findMany({
+      where: { bidId },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // Compute explainable deterministic risk score
+    const riskItems = results.map((r) => ({
+      status: r.finalStatus || r.status,
       category: r.requirement.category,
       mandatory: r.requirement.mandatory,
+      code: r.requirement.code,
+      description: r.requirement.description,
+      missingEvidence: r.missingEvidence,
+      hasContradiction: r.hasContradiction,
+      ruleStatus: r.ruleStatus,
     }));
 
-    const riskScore = computeRiskScore(riskItems);
+    const contradictionItems = contradictions.map((c) => ({
+      fieldName: c.fieldName,
+      docAName: c.docAName,
+      docBName: c.docBName,
+      severity: c.severity,
+    }));
+
+    const riskScore = computeRiskScore(riskItems, contradictionItems);
 
     res.json({
       bid,
       results,
+      contradictions,
       riskScore,
     });
   } catch (error) {
@@ -112,7 +130,7 @@ router.get('/:bidId/compliance/:reqId', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Result not found' });
     }
 
-    // Get all evidence for this bid to show context
+    // Get all evidence for this bid
     const allEvidence = await prisma.evidence.findMany({
       where: {
         document: { bidId },
@@ -120,6 +138,7 @@ router.get('/:bidId/compliance/:reqId', async (req: Request, res: Response) => {
       include: {
         document: {
           select: {
+            id: true,
             originalName: true,
             docType: true,
           },

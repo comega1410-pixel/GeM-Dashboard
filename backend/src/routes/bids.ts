@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import prisma from '../lib/prisma';
+import { logAuditEvent } from '../services/auditLogger';
 
 const router = Router();
 
@@ -20,6 +21,14 @@ router.post('/', async (req: Request, res: Response) => {
       },
     });
 
+    const actor = (req.headers['x-user-email'] as string) || 'officer@gem.gov.in';
+    await logAuditEvent({
+      bidId: bid.id,
+      action: 'BID_CREATED',
+      actor,
+      notes: `Created bid: "${bid.title}" (${bid.gemBidNumber || 'No GeM Bid Number'})`,
+    });
+
     res.status(201).json(bid);
   } catch (error) {
     console.error('Create bid error:', error);
@@ -38,6 +47,7 @@ router.get('/', async (_req: Request, res: Response) => {
             documents: true,
             requirements: true,
             results: true,
+            contradictions: true,
           },
         },
       },
@@ -62,11 +72,16 @@ router.get('/:id', async (req: Request, res: Response) => {
             docType: true,
             totalPages: true,
             processed: true,
+            extractionConfidence: true,
+            userCorrected: true,
             createdAt: true,
           },
         },
         requirements: {
           orderBy: { code: 'asc' },
+        },
+        contradictions: {
+          orderBy: { createdAt: 'desc' },
         },
         results: {
           include: {
@@ -75,6 +90,7 @@ router.get('/:id', async (req: Request, res: Response) => {
               include: {
                 document: {
                   select: {
+                    id: true,
                     originalName: true,
                     docType: true,
                   },
@@ -91,6 +107,7 @@ router.get('/:id', async (req: Request, res: Response) => {
             documents: true,
             requirements: true,
             results: true,
+            contradictions: true,
           },
         },
       },
@@ -110,10 +127,21 @@ router.get('/:id', async (req: Request, res: Response) => {
 // Delete a bid
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
-    await prisma.bid.delete({
-      where: { id: req.params.id as string },
+    const id = req.params.id as string;
+    const actor = (req.headers['x-user-email'] as string) || 'officer@gem.gov.in';
+
+    await logAuditEvent({
+      bidId: id,
+      action: 'BID_DELETED',
+      actor,
+      notes: `Deleted bid ${id}`,
     });
-    res.json({ message: 'Bid deleted' });
+
+    await prisma.bid.delete({
+      where: { id },
+    });
+
+    res.json({ message: 'Bid deleted successfully' });
   } catch (error) {
     console.error('Delete bid error:', error);
     res.status(500).json({ error: 'Failed to delete bid' });

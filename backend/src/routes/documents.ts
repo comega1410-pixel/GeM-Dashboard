@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import prisma from '../lib/prisma';
 import { upload } from '../middleware/upload';
+import { logAuditEvent } from '../services/auditLogger';
 
 const router = Router();
 
@@ -14,13 +15,11 @@ router.post('/:bidId/documents', upload.array('files', 20), async (req: Request,
       return res.status(400).json({ error: 'No files uploaded' });
     }
 
-    // Check bid exists
     const bid = await prisma.bid.findUnique({ where: { id: bidId } });
     if (!bid) {
       return res.status(404).json({ error: 'Bid not found' });
     }
 
-    // Get docTypes from body (comma-separated or JSON array matching file order)
     let docTypes: string[] = [];
     if (req.body.docTypes) {
       try {
@@ -45,6 +44,14 @@ router.post('/:bidId/documents', upload.array('files', 20), async (req: Request,
       })
     );
 
+    const actor = (req.headers['x-user-email'] as string) || 'officer@gem.gov.in';
+    await logAuditEvent({
+      bidId,
+      action: 'DOCUMENT_UPLOADED',
+      actor,
+      notes: `Uploaded ${savedDocs.length} document(s): ${files.map((f) => f.originalname).join(', ')}`,
+    });
+
     res.status(201).json(savedDocs);
   } catch (error) {
     console.error('Upload documents error:', error);
@@ -66,6 +73,9 @@ router.get('/:bidId/documents', async (req: Request, res: Response) => {
         totalPages: true,
         processed: true,
         ocrRequired: true,
+        extractionConfidence: true,
+        userCorrected: true,
+        correctedDocType: true,
         createdAt: true,
       },
     });
@@ -73,6 +83,55 @@ router.get('/:bidId/documents', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('List documents error:', error);
     res.status(500).json({ error: 'Failed to list documents' });
+  }
+});
+
+// Correct document type by officer
+router.patch('/:bidId/documents/:docId/type', async (req: Request, res: Response) => {
+  try {
+    const bidId = req.params.bidId as string;
+    const docId = req.params.docId as string;
+    const { docType } = req.body;
+
+    if (!docType) {
+      return res.status(400).json({ error: 'docType is required' });
+    }
+
+    const existing = await prisma.document.findUnique({
+      where: { id: docId },
+    });
+
+    if (!existing || existing.bidId !== bidId) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    const previousType = existing.docType;
+
+    const updated = await prisma.document.update({
+      where: { id: docId },
+      data: {
+        docType,
+        userCorrected: true,
+        correctedDocType: docType,
+      },
+    });
+
+    const actor = (req.headers['x-user-email'] as string) || 'officer@gem.gov.in';
+    await logAuditEvent({
+      bidId,
+      action: 'DOCUMENT_TYPE_CORRECTED',
+      actor,
+      entityType: 'DOCUMENT',
+      entityId: docId,
+      previousState: previousType,
+      newState: docType,
+      notes: `Officer updated document type from ${previousType} to ${docType} for ${existing.originalName}`,
+    });
+
+    res.json({ message: 'Document classification updated successfully', document: updated });
+  } catch (error) {
+    console.error('Update doc type error:', error);
+    res.status(500).json({ error: 'Failed to update document classification' });
   }
 });
 

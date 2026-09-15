@@ -3,124 +3,193 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
-enum BidStatus {
-  UPLOADED
-  PROCESSING
-  ANALYZED
-  ERROR
-}
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String
+  role      String   @default("PROCUREMENT_OFFICER") // ADMIN, PROCUREMENT_OFFICER, REVIEWER, AUDITOR
+  createdAt DateTime @default(now())
 
-enum RequirementCategory {
-  FINANCIAL
-  EXPERIENCE
-  CERTIFICATION
-  TECHNICAL
-  LEGAL
-  DOCUMENT_VALIDITY
-  BID_SPECIFIC
-}
-
-enum DocumentType {
-  BID_DOCUMENT
-  FINANCIAL_STATEMENT
-  CERTIFICATE
-  PURCHASE_ORDER
-  AUTHORIZATION
-  TECHNICAL_SPEC
-  OTHER
-}
-
-enum ComplianceStatus {
-  COMPLIANT
-  NON_COMPLIANT
-  NEEDS_REVIEW
+  @@map("users")
 }
 
 model Bid {
-  id           String    @id @default(uuid())
+  id           String   @id @default(uuid())
   title        String
   gemBidNumber String?
   description  String?
-  status       BidStatus @default(UPLOADED)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  status       String   @default("UPLOADED") // UPLOADED, PROCESSING, ANALYZED, ERROR
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  documents    Document[]
-  requirements Requirement[]
-  results      ComplianceResult[]
+  documents      Document[]
+  requirements   Requirement[]
+  results        ComplianceResult[]
+  contradictions Contradiction[]
+  auditLogs      AuditLog[]
 
   @@map("bids")
 }
 
 model Requirement {
-  id             String              @id @default(uuid())
-  bidId          String
-  bid            Bid                 @relation(fields: [bidId], references: [id], onDelete: Cascade)
-  code           String
-  category       RequirementCategory
-  description    String
-  mandatory      Boolean             @default(true)
-  operator       String?
-  thresholdValue Float?
-  unit           String?
-  sourcePage     Int?
+  id                    String   @id @default(uuid())
+  bidId                 String
+  bid                   Bid      @relation(fields: [bidId], references: [id], onDelete: Cascade)
+  code                  String
+  category              String // FINANCIAL, EXPERIENCE, CERTIFICATION, TECHNICAL, LEGAL, DOCUMENT_VALIDITY, BID_SPECIFIC
+  description           String
+  mandatory             Boolean  @default(true)
+  operator              String?
+  thresholdValue        Float?
+  unit                  String?
+  expectedEvidenceType  String?
+  validationType        String?  @default("HYBRID") // RULE, SEMANTIC, HYBRID
+  sourcePage            Int?
+  sourceRequirementText String?
 
-  results        ComplianceResult[]
+  results ComplianceResult[]
 
   @@map("requirements")
 }
 
 model Document {
-  id            String       @id @default(uuid())
-  bidId         String
-  bid           Bid          @relation(fields: [bidId], references: [id], onDelete: Cascade)
-  filename      String
-  originalName  String
-  docType       DocumentType @default(OTHER)
-  filePath      String
-  totalPages    Int?
-  ocrRequired   Boolean      @default(false)
-  processedText String?
-  processed     Boolean      @default(false)
-  createdAt     DateTime     @default(now())
+  id                   String   @id @default(uuid())
+  bidId                String
+  bid                  Bid      @relation(fields: [bidId], references: [id], onDelete: Cascade)
+  filename             String
+  originalName         String
+  docType              String   @default("OTHER") // BID_DOCUMENT, FINANCIAL_STATEMENT, GST_CERTIFICATE, EXPERIENCE_CERTIFICATE, WORK_ORDER, OEM_AUTHORIZATION, ISO_CERTIFICATE, TECHNICAL_SPEC, AFFIDAVIT_DECLARATION, WARRANTY_DOCUMENT, OTHER
+  filePath             String
+  totalPages           Int?
+  ocrRequired          Boolean  @default(false)
+  processedText        String?
+  processed            Boolean  @default(false)
+  extractionConfidence Float?
+  processingErrors     String?
+  userCorrected        Boolean  @default(false)
+  correctedDocType     String?
+  createdAt            DateTime @default(now())
 
-  evidence      Evidence[]
+  evidence Evidence[]
 
   @@map("documents")
 }
 
 model Evidence {
-  id             String   @id @default(uuid())
-  documentId     String
-  document       Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  fieldName      String
-  extractedValue String
-  pageNumber     Int?
-  confidence     Float?
-  rawText        String?
+  id              String   @id @default(uuid())
+  documentId      String
+  document        Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  fieldName       String
+  extractedValue  String
+  pageNumber      Int?
+  confidence      Float?
+  rawText         String?
+  evidenceType    String?
+  isMissing       Boolean  @default(false)
+  isContradictory Boolean  @default(false)
+  createdAt       DateTime @default(now())
 
-  results        ComplianceResult[]
+  results ComplianceResult[]
 
   @@map("evidence")
 }
 
 model ComplianceResult {
-  id            String           @id @default(uuid())
+  id            String      @id @default(uuid())
   bidId         String
-  bid           Bid              @relation(fields: [bidId], references: [id], onDelete: Cascade)
+  bid           Bid         @relation(fields: [bidId], references: [id], onDelete: Cascade)
   requirementId String
-  requirement   Requirement      @relation(fields: [requirementId], references: [id], onDelete: Cascade)
-  status        ComplianceStatus
+  requirement   Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  status        String // COMPLIANT, NON_COMPLIANT, NEEDS_REVIEW
   confidence    Float
   reason        String
   explanation   String?
   evidenceId    String?
-  evidence      Evidence?        @relation(fields: [evidenceId], references: [id], onDelete: SetNull)
-  createdAt     DateTime         @default(now())
+  evidence      Evidence?   @relation(fields: [evidenceId], references: [id], onDelete: SetNull)
+
+  validationMethod String  @default("HYBRID") // RULE, SEMANTIC, HYBRID
+  ruleStatus       String? // COMPLIANT, NON_COMPLIANT, NEEDS_REVIEW
+  ruleCalculation  String?
+  aiStatus         String? // COMPLIANT, NON_COMPLIANT, NEEDS_REVIEW
+  aiConfidence     Float?
+  aiReasoning      String?
+
+  missingEvidence  Boolean @default(false)
+  hasContradiction Boolean @default(false)
+  isMandatoryIssue Boolean @default(false)
+
+  finalStatus      String    @default("NEEDS_REVIEW") // COMPLIANT, NON_COMPLIANT, NEEDS_REVIEW
+  reviewedBy       String?
+  reviewerDecision String? // COMPLIANT, NON_COMPLIANT, NEEDS_REVIEW
+  reviewerReason   String?
+  reviewedAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@map("compliance_results")
+}
+
+model Contradiction {
+  id              String   @id @default(uuid())
+  bidId           String
+  bid             Bid      @relation(fields: [bidId], references: [id], onDelete: Cascade)
+  fieldName       String
+  docAId          String
+  docAName        String
+  pageA           Int?
+  valueA          String
+  docBId          String
+  docBName        String
+  pageB           Int?
+  valueB          String
+  explanation     String
+  severity        String   @default("HIGH") // HIGH, MEDIUM, LOW
+  resolved        Boolean  @default(false)
+  resolutionNotes String?
+  resolvedBy      String?
+  createdAt       DateTime @default(now())
+
+  @@map("contradictions")
+}
+
+model AuditLog {
+  id            String   @id @default(uuid())
+  bidId         String?
+  bid           Bid?     @relation(fields: [bidId], references: [id], onDelete: Cascade)
+  action        String
+  actor         String
+  actorRole     String   @default("PROCUREMENT_OFFICER")
+  entityType    String?
+  entityId      String?
+  previousState String?
+  newState      String?
+  notes         String?
+  timestamp     DateTime @default(now())
+
+  @@map("audit_logs")
+}
+
+model BenchmarkRun {
+  id                      String   @id @default(uuid())
+  title                   String
+  datasetName             String
+  requirementAccuracy     Float
+  ruleAccuracy            Float
+  semanticAccuracy        Float
+  citationAccuracy        Float
+  missingEvidenceAccuracy Float
+  contradictionAccuracy   Float
+  manualReviewMinutes     Float
+  aiAssistedMinutes       Float
+  totalTests              Int
+  passedTests             Int
+  details                 String
+  createdAt               DateTime @default(now())
+
+  @@map("benchmark_runs")
 }

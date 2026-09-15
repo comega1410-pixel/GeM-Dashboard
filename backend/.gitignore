@@ -15,5 +15,6 @@ uploads/
 # Logs
 *.log
 
-# Prisma migrations (optional — include if you want reproducible migrations)
-# prisma/migrations/
+# Databases
+*.db
+*.db-journal

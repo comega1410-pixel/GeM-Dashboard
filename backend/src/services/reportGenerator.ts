@@ -1,14 +1,13 @@
 import PDFDocument from 'pdfkit';
 import prisma from '../lib/prisma';
-import { computeRiskScore, RiskScore } from './riskScorer';
+import { computeRiskScore } from './riskScorer';
 import { generateExecutiveSummary } from './complianceEngine';
 
 /**
- * Generate a full compliance report PDF for a bid.
+ * Generate a full audit-grade compliance report PDF for a bid.
  * Returns a readable stream of the PDF document.
  */
 export async function generateReport(bidId: string): Promise<PDFKit.PDFDocument> {
-  // Fetch all data
   const bid = await prisma.bid.findUnique({
     where: { id: bidId },
     include: {
@@ -22,6 +21,8 @@ export async function generateReport(bidId: string): Promise<PDFKit.PDFDocument>
         },
       },
       requirements: { orderBy: { code: 'asc' } },
+      contradictions: { orderBy: { createdAt: 'desc' } },
+      auditLogs: { orderBy: { timestamp: 'desc' }, take: 10 },
       results: {
         include: {
           requirement: true,
@@ -41,92 +42,90 @@ export async function generateReport(bidId: string): Promise<PDFKit.PDFDocument>
   if (!bid) throw new Error('Bid not found');
   if (bid.status !== 'ANALYZED') throw new Error('Analysis not yet complete');
 
-  // Compute risk score
-  const riskItems = bid.results.map((r: { status: string; requirement: { category: string; mandatory: boolean } }) => ({
-    status: r.status,
+  // Compute explainable risk score
+  const riskItems = bid.results.map((r: any) => ({
+    status: r.finalStatus || r.status,
     category: r.requirement.category,
     mandatory: r.requirement.mandatory,
+    code: r.requirement.code,
+    description: r.requirement.description,
+    missingEvidence: r.missingEvidence,
+    hasContradiction: r.hasContradiction,
+    ruleStatus: r.ruleStatus,
   }));
-  const riskScore = computeRiskScore(riskItems);
+
+  const contradictionItems = bid.contradictions.map((c: any) => ({
+    fieldName: c.fieldName,
+    docAName: c.docAName,
+    docBName: c.docBName,
+    severity: c.severity,
+  }));
+
+  const riskScore = computeRiskScore(riskItems, contradictionItems);
 
   // Generate executive summary
   let executiveSummary: string;
   try {
     executiveSummary = await generateExecutiveSummary(bidId);
   } catch {
-    executiveSummary = 'Executive summary generation failed. Please refer to the detailed analysis below.';
+    executiveSummary = 'Executive summary generation completed with rule-based metrics. Refer to detailed breakdown below.';
   }
 
   // ── Create PDF ─────────────────────────────────────
   const doc = new PDFDocument({
     size: 'A4',
-    margins: { top: 60, bottom: 60, left: 50, right: 50 },
+    margins: { top: 50, bottom: 50, left: 45, right: 45 },
     info: {
-      Title: `Compliance Report — ${bid.title}`,
+      Title: `GeM Compliance Audit Report — ${bid.title}`,
       Author: 'GeM Compliance Copilot',
-      Subject: 'Bid Compliance Analysis Report',
-      Creator: 'GeM Compliance Copilot',
+      Subject: 'Official Bid Compliance Audit Report',
+      Creator: 'GeM Compliance Copilot (SIH Upgrade)',
     },
   });
 
   const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
 
   const colors = {
-    primary: '#1a1a2e',
-    accent: '#6c5ce7',
-    teal: '#00cec9',
-    success: '#00c853',
-    warning: '#ff9100',
-    danger: '#ff1744',
-    textDark: '#1a1a2e',
-    textMuted: '#666680',
-    bgLight: '#f4f4f8',
-    border: '#dddde8',
+    primary: '#0f172a',
+    accent: '#4f46e5',
+    teal: '#0d9488',
+    success: '#16a34a',
+    warning: '#d97706',
+    danger: '#dc2626',
+    textDark: '#1e293b',
+    textMuted: '#64748b',
+    bgLight: '#f8fafc',
+    border: '#cbd5e1',
   };
 
-  // ── Helper functions ───────────────────────────────
+  // Helper functions
   function addHeader(text: string, size: number = 18) {
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(size)
-      .fillColor(colors.primary)
-      .text(text, { underline: false });
+    doc.font('Helvetica-Bold').fontSize(size).fillColor(colors.primary).text(text);
     doc.moveDown(0.3);
-    // Accent underline
     const y = doc.y;
     doc
       .moveTo(doc.page.margins.left, y)
-      .lineTo(doc.page.margins.left + 80, y)
-      .lineWidth(3)
+      .lineTo(doc.page.margins.left + 70, y)
+      .lineWidth(2.5)
       .strokeColor(colors.accent)
       .stroke();
     doc.moveDown(0.6);
   }
 
   function addSubheader(text: string) {
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(13)
-      .fillColor(colors.accent)
-      .text(text);
-    doc.moveDown(0.3);
+    ensureSpace(35);
+    doc.font('Helvetica-Bold').fontSize(12).fillColor(colors.primary).text(text);
+    doc.moveDown(0.4);
   }
 
   function addBody(text: string) {
-    doc
-      .font('Helvetica')
-      .fontSize(10)
-      .fillColor(colors.textDark)
-      .text(text, { lineGap: 3 });
+    doc.font('Helvetica').fontSize(9).fillColor(colors.textDark).text(text);
     doc.moveDown(0.3);
   }
 
   function addMuted(text: string) {
-    doc
-      .font('Helvetica')
-      .fontSize(9)
-      .fillColor(colors.textMuted)
-      .text(text, { lineGap: 2 });
+    doc.font('Helvetica').fontSize(8).fillColor(colors.textMuted).text(text);
+    doc.moveDown(0.2);
   }
 
   function addDivider() {
@@ -138,35 +137,7 @@ export async function generateReport(bidId: string): Promise<PDFKit.PDFDocument>
       .lineWidth(0.5)
       .strokeColor(colors.border)
       .stroke();
-    doc.moveDown(0.6);
-  }
-
-  function statusEmoji(status: string): string {
-    switch (status) {
-      case 'COMPLIANT': return 'PASS';
-      case 'NON_COMPLIANT': return 'FAIL';
-      case 'NEEDS_REVIEW': return 'REVIEW';
-      default: return status;
-    }
-  }
-
-  function statusColor(status: string): string {
-    switch (status) {
-      case 'COMPLIANT': return colors.success;
-      case 'NON_COMPLIANT': return colors.danger;
-      case 'NEEDS_REVIEW': return colors.warning;
-      default: return colors.textMuted;
-    }
-  }
-
-  function riskLevelColor(level: string): string {
-    switch (level) {
-      case 'LOW': return colors.success;
-      case 'MEDIUM': return colors.warning;
-      case 'HIGH': return colors.danger;
-      case 'CRITICAL': return colors.danger;
-      default: return colors.textMuted;
-    }
+    doc.moveDown(0.5);
   }
 
   function ensureSpace(needed: number) {
@@ -175,372 +146,218 @@ export async function generateReport(bidId: string): Promise<PDFKit.PDFDocument>
     }
   }
 
-  // ── Page 1: Cover ──────────────────────────────────
-  doc.moveDown(4);
-
-  // Title block
+  // ── Cover Banner ───────────────────────────────────
+  const startY = doc.y;
   doc
-    .font('Helvetica-Bold')
-    .fontSize(28)
-    .fillColor(colors.accent)
-    .text('COMPLIANCE REPORT', { align: 'center' });
-  doc.moveDown(0.3);
-  doc
-    .font('Helvetica')
-    .fontSize(12)
-    .fillColor(colors.textMuted)
-    .text('GeM Bid Compliance Copilot — Automated Analysis', { align: 'center' });
+    .roundedRect(doc.page.margins.left, startY, pageWidth, 68, 6)
+    .fillColor(colors.primary)
+    .fill();
 
-  doc.moveDown(2);
-
-  // Horizontal rule
-  const ruleY = doc.y;
-  doc
-    .moveTo(doc.page.margins.left + 100, ruleY)
-    .lineTo(doc.page.margins.left + pageWidth - 100, ruleY)
-    .lineWidth(2)
-    .strokeColor(colors.accent)
-    .stroke();
-
-  doc.moveDown(2);
-
-  // Bid info
   doc
     .font('Helvetica-Bold')
     .fontSize(16)
-    .fillColor(colors.textDark)
-    .text(bid.title, { align: 'center' });
+    .fillColor('#ffffff')
+    .text('GOVERNMENT e-MARKETPLACE (GeM) COMPLIANCE AUDIT REPORT', doc.page.margins.left + 15, startY + 12);
 
-  if (bid.gemBidNumber) {
-    doc.moveDown(0.3);
-    doc
-      .font('Helvetica')
-      .fontSize(11)
-      .fillColor(colors.textMuted)
-      .text(`Bid Number: ${bid.gemBidNumber}`, { align: 'center' });
-  }
-
-  doc.moveDown(0.5);
   doc
     .font('Helvetica')
-    .fontSize(10)
-    .fillColor(colors.textMuted)
-    .text(`Generated: ${new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}`, { align: 'center' });
+    .fontSize(9)
+    .fillColor('#94a3b8')
+    .text(`Bid: "${bid.title}" | GeM Bid No: ${bid.gemBidNumber || 'N/A'} | Generated: ${new Date().toLocaleDateString('en-IN')}`, doc.page.margins.left + 15, startY + 38);
 
-  doc.moveDown(3);
+  doc.y = startY + 80;
 
-  // Quick stats box
-  const boxY = doc.y;
-  const boxHeight = 80;
+  // Qualification Status Banner
+  const isBlocked = riskScore.mandatoryFailures > 0 || riskScore.contradictionCount > 0;
+  const bannerColor = isBlocked ? colors.danger : colors.success;
+  const bannerBg = isBlocked ? '#fee2e2' : '#dcfce7';
+
+  const bannerY = doc.y;
   doc
-    .roundedRect(doc.page.margins.left + 40, boxY, pageWidth - 80, boxHeight, 8)
-    .fillColor(colors.bgLight)
+    .roundedRect(doc.page.margins.left, bannerY, pageWidth, 32, 4)
+    .fillColor(bannerBg)
     .fill();
 
-  const statWidth = (pageWidth - 80) / 4;
-  const stats = [
-    { value: String(riskScore.totalRequirements), label: 'Requirements' },
-    { value: String(riskScore.compliant), label: 'Compliant' },
-    { value: String(riskScore.needsReview), label: 'Needs Review' },
-    { value: String(riskScore.nonCompliant), label: 'Non-Compliant' },
-  ];
-
-  stats.forEach((stat, i) => {
-    const x = doc.page.margins.left + 40 + i * statWidth;
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(22)
-      .fillColor(colors.accent)
-      .text(stat.value, x, boxY + 18, { width: statWidth, align: 'center' });
-    doc
-      .font('Helvetica')
-      .fontSize(8)
-      .fillColor(colors.textMuted)
-      .text(stat.label.toUpperCase(), x, boxY + 48, { width: statWidth, align: 'center' });
-  });
-
-  doc.y = boxY + boxHeight + 30;
-
-  // Risk level
-  doc
-    .font('Helvetica-Bold')
-    .fontSize(14)
-    .fillColor(riskLevelColor(riskScore.riskLevel))
-    .text(`Risk Level: ${riskScore.riskLevel}`, { align: 'center' });
-
-  if (riskScore.mandatoryFailures > 0) {
-    doc.moveDown(0.3);
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(10)
-      .fillColor(colors.danger)
-      .text(`⚠ ${riskScore.mandatoryFailures} mandatory requirement(s) failed`, { align: 'center' });
-  }
-
-  // ── Page 2: Executive Summary ──────────────────────
-  doc.addPage();
-  addHeader('1. Executive Summary');
-  addBody(executiveSummary);
-  addDivider();
-
-  // Recommendation
-  addSubheader('Recommendation');
   doc
     .font('Helvetica-Bold')
     .fontSize(10)
-    .fillColor(riskScore.mandatoryFailures > 0 ? colors.danger : colors.success)
-    .text(riskScore.recommendation, { lineGap: 3 });
-  doc.moveDown(0.5);
+    .fillColor(bannerColor)
+    .text(
+      isBlocked
+        ? '⚠️ MANDATORY ISSUE DETECTED — AUTOMATED QUALIFICATION BLOCKED (HUMAN REVIEW REQUIRED)'
+        : '✓ ALL MANDATORY REQUIREMENTS SATISFIED — PENDING OFFICER FINAL SIGN-OFF',
+      doc.page.margins.left + 12,
+      bannerY + 10
+    );
+
+  doc.y = bannerY + 42;
+
+  // ── 1. Executive Summary ───────────────────────────
+  addHeader('1. Executive Summary', 14);
+  addBody(executiveSummary);
+
   addDivider();
 
-  // ── Category Breakdown ─────────────────────────────
-  addHeader('2. Category Breakdown', 16);
+  // ── 2. Explainable Risk Breakdown ───────────────────
+  addHeader('2. Explainable Risk Scoring Breakdown', 14);
 
-  const categories = [
-    { label: 'Financial Compliance', value: riskScore.financialCompliance },
-    { label: 'Technical Compliance', value: riskScore.technicalCompliance },
-    { label: 'Experience Compliance', value: riskScore.experienceCompliance },
-    { label: 'Certification Compliance', value: riskScore.certificationCompliance },
-    { label: 'Documentation Compliance', value: riskScore.documentationCompliance },
+  // Cards row
+  const cardWidth = (pageWidth - 20) / 3;
+  const cardY = doc.y;
+
+  // Score Card
+  doc.roundedRect(doc.page.margins.left, cardY, cardWidth, 50, 4).fillColor(colors.bgLight).fill();
+  doc.font('Helvetica-Bold').fontSize(16).fillColor(isBlocked ? colors.danger : colors.success).text(`${riskScore.overallScore}/100`, doc.page.margins.left + 10, cardY + 10);
+  doc.font('Helvetica').fontSize(8).fillColor(colors.textMuted).text('Overall Risk Score (0 = Min, 100 = Max)', doc.page.margins.left + 10, cardY + 32);
+
+  // Mandatory Card
+  doc.roundedRect(doc.page.margins.left + cardWidth + 10, cardY, cardWidth, 50, 4).fillColor(colors.bgLight).fill();
+  doc.font('Helvetica-Bold').fontSize(16).fillColor(riskScore.mandatoryFailures > 0 ? colors.danger : colors.success).text(`${riskScore.mandatoryFailures}`, doc.page.margins.left + cardWidth + 20, cardY + 10);
+  doc.font('Helvetica').fontSize(8).fillColor(colors.textMuted).text('Mandatory Failures', doc.page.margins.left + cardWidth + 20, cardY + 32);
+
+  // Contradictions Card
+  doc.roundedRect(doc.page.margins.left + (cardWidth + 10) * 2, cardY, cardWidth, 50, 4).fillColor(colors.bgLight).fill();
+  doc.font('Helvetica-Bold').fontSize(16).fillColor(riskScore.contradictionCount > 0 ? colors.warning : colors.success).text(`${riskScore.contradictionCount}`, doc.page.margins.left + (cardWidth + 10) * 2 + 10, cardY + 10);
+  doc.font('Helvetica').fontSize(8).fillColor(colors.textMuted).text('Contradictions Detected', doc.page.margins.left + (cardWidth + 10) * 2 + 10, cardY + 32);
+
+  doc.y = cardY + 60;
+
+  // Category Risk Table
+  doc.font('Helvetica-Bold').fontSize(9).fillColor(colors.primary).text('Category Risk Penalties (out of 20 max each):');
+  doc.moveDown(0.2);
+
+  const cats = [
+    { name: 'Financial', score: riskScore.categoryBreakdown.financial.score },
+    { name: 'Technical', score: riskScore.categoryBreakdown.technical.score },
+    { name: 'Experience', score: riskScore.categoryBreakdown.experience.score },
+    { name: 'Certification', score: riskScore.categoryBreakdown.certification.score },
+    { name: 'Documentation', score: riskScore.categoryBreakdown.documentation.score },
   ];
 
-  categories.forEach((cat) => {
-    const barY = doc.y;
-    const barWidth = pageWidth * 0.55;
-    const barHeight = 12;
-    const barX = doc.page.margins.left + 160;
+  doc.font('Helvetica').fontSize(8).fillColor(colors.textDark).text(cats.map((c) => `${c.name}: ${c.score}/20`).join('   |   '));
+  doc.moveDown(0.5);
 
-    doc
-      .font('Helvetica')
-      .fontSize(9)
-      .fillColor(colors.textDark)
-      .text(cat.label, doc.page.margins.left, barY + 1, { width: 155 });
-
-    // Background bar
-    doc
-      .roundedRect(barX, barY, barWidth, barHeight, 4)
-      .fillColor('#e8e8f0')
-      .fill();
-
-    // Value bar
-    const filledWidth = (cat.value / 100) * barWidth;
-    const barColor = cat.value >= 80 ? colors.success : cat.value >= 50 ? colors.warning : colors.danger;
-    if (filledWidth > 0) {
-      doc
-        .roundedRect(barX, barY, Math.max(filledWidth, 8), barHeight, 4)
-        .fillColor(barColor)
-        .fill();
-    }
-
-    // Percentage
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(9)
-      .fillColor(colors.textDark)
-      .text(`${cat.value}%`, barX + barWidth + 10, barY + 1);
-
-    doc.y = barY + barHeight + 8;
-  });
+  // Top Risk Drivers
+  if (riskScore.topRiskDrivers.length > 0) {
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(colors.danger).text('Top Identified Risk Drivers:');
+    doc.moveDown(0.2);
+    riskScore.topRiskDrivers.forEach((driver, idx) => {
+      doc.font('Helvetica').fontSize(8).fillColor(colors.textDark).text(`${idx + 1}. ${driver}`);
+    });
+  }
 
   addDivider();
 
-  // ── Documents Processed ────────────────────────────
-  addHeader('3. Documents Processed', 16);
+  // ── 3. Contradictions Section (if any) ──────────────
+  if (bid.contradictions.length > 0) {
+    ensureSpace(80);
+    addHeader('3. Cross-Document Contradiction Analysis', 14);
 
-  bid.documents.forEach((d: { originalName: string; docType: string; totalPages: number | null; processed: boolean }, i: number) => {
-    ensureSpace(30);
+    bid.contradictions.forEach((c: any, i: number) => {
+      ensureSpace(45);
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(colors.danger).text(`[${i + 1}] Conflict in ${c.fieldName}:`);
+      doc.font('Helvetica').fontSize(8).fillColor(colors.textDark).text(`• Document A: ${c.docAName} ${c.pageA ? `(Page ${c.pageA})` : ''} → Value: "${c.valueA}"`);
+      doc.font('Helvetica').fontSize(8).fillColor(colors.textDark).text(`• Document B: ${c.docBName} ${c.pageB ? `(Page ${c.pageB})` : ''} → Value: "${c.valueB}"`);
+      doc.font('Helvetica').fontSize(8).fillColor(colors.textMuted).text(`Analysis: ${c.explanation}`);
+      doc.moveDown(0.4);
+    });
+
+    addDivider();
+  }
+
+  // ── 4. Requirement-by-Requirement Evidence Graph ────
+  doc.addPage();
+  addHeader('4. Complete Requirement Compliance Matrix & Evidence Graph', 14);
+
+  for (const r of bid.results) {
+    ensureSpace(85);
+
+    const isNonComp = r.finalStatus === 'NON_COMPLIANT';
+    const isReview = r.finalStatus === 'NEEDS_REVIEW';
+    const statusColor = isNonComp ? colors.danger : isReview ? colors.warning : colors.success;
+
+    // Requirement Code and Status
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(statusColor).text(`[${r.finalStatus}] `, { continued: true });
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(colors.primary).text(`${r.requirement.code}: ${r.requirement.description}`);
+    doc.moveDown(0.2);
+
+    // Metadata line
     doc
-      .font('Helvetica')
-      .fontSize(9)
-      .fillColor(colors.textDark)
-      .text(`${i + 1}. ${d.originalName}`, {
-        continued: true,
-      })
       .font('Helvetica')
       .fontSize(8)
       .fillColor(colors.textMuted)
-      .text(`  [${d.docType}] — ${d.totalPages || '?'} pages — ${d.processed ? 'Processed' : 'Pending'}`);
-  });
-
-  doc.moveDown(0.5);
-  addDivider();
-
-  // ── Requirement-by-Requirement Analysis ────────────
-  doc.addPage();
-  addHeader('4. Compliance Matrix — Detailed Analysis');
-
-  // Separate by status for better readability
-  const failures = bid.results.filter((r: any) => r.status === 'NON_COMPLIANT');
-  const reviews = bid.results.filter((r: any) => r.status === 'NEEDS_REVIEW');
-  const passes = bid.results.filter((r: any) => r.status === 'COMPLIANT');
-
-  function renderResult(result: (typeof failures)[number], index: number) {
-    ensureSpace(100);
-
-    // Requirement header row
-    const headerY = doc.y;
-    const badgeWidth = 55;
-
-    // Status badge background
-    doc
-      .roundedRect(doc.page.margins.left, headerY, badgeWidth, 16, 3)
-      .fillColor(statusColor(result.status))
-      .fill();
-
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(8)
-      .fillColor('#ffffff')
-      .text(statusEmoji(result.status), doc.page.margins.left + 4, headerY + 3, { width: badgeWidth - 8, align: 'center' });
-
-    // Code + description
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(10)
-      .fillColor(colors.textDark)
       .text(
-        `${result.requirement.code}: ${result.requirement.description}`,
-        doc.page.margins.left + badgeWidth + 10,
-        headerY,
-        { width: pageWidth - badgeWidth - 10 }
+        `Category: ${r.requirement.category}  |  ${r.requirement.mandatory ? 'MANDATORY' : 'OPTIONAL'}  |  Validation: ${r.validationMethod}  |  Confidence: ${Math.round(
+          r.confidence * 100
+        )}%`
       );
 
-    doc.moveDown(0.3);
-
-    // Meta line
-    const metaParts: string[] = [
-      `Category: ${result.requirement.category}`,
-      result.requirement.mandatory ? 'MANDATORY' : 'Optional',
-      `Confidence: ${Math.round(result.confidence * 100)}%`,
-    ];
-
-    if (result.requirement.operator) {
-      metaParts.push(`Threshold: ${result.requirement.operator} ${result.requirement.thresholdValue} ${result.requirement.unit || ''}`);
+    // Calculation if numeric
+    if (r.ruleCalculation) {
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(colors.accent).text(`Rule Calculation: `, { continued: true });
+      doc.font('Helvetica').fontSize(8).fillColor(colors.textDark).text(r.ruleCalculation);
     }
 
-    if (result.requirement.sourcePage) {
-      metaParts.push(`Source: Page ${result.requirement.sourcePage}`);
-    }
-
-    addMuted(metaParts.join(' · '));
-    doc.moveDown(0.2);
-
-    // Evidence
-    if (result.evidence) {
-      doc
-        .font('Helvetica-Bold')
-        .fontSize(9)
-        .fillColor(colors.accent)
-        .text('Evidence:', { continued: true })
-        .font('Helvetica')
-        .fillColor(colors.textDark)
-        .text(` ${result.evidence.document?.originalName || 'Document'}`);
-
+    // Evidence citation
+    if (r.evidence) {
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(colors.textDark).text(`Evidence Source: `, { continued: true });
       doc
         .font('Helvetica')
-        .fontSize(9)
+        .fontSize(8)
         .fillColor(colors.textDark)
-        .text(`Extracted Value: ${result.evidence.extractedValue}`);
-
-      if (result.evidence.pageNumber) {
-        addMuted(`Page: ${result.evidence.pageNumber}`);
-      }
-
-      if (result.evidence.rawText) {
-        doc.moveDown(0.1);
-        const snippetY = doc.y;
-        doc
-          .roundedRect(doc.page.margins.left + 10, snippetY, pageWidth - 20, 24, 3)
-          .fillColor(colors.bgLight)
-          .fill();
-        doc
-          .font('Helvetica')
-          .fontSize(8)
-          .fillColor(colors.textMuted)
-          .text(`"${result.evidence.rawText.slice(0, 150)}"`, doc.page.margins.left + 15, snippetY + 5, {
-            width: pageWidth - 30,
-          });
-        doc.y = snippetY + 28;
-      }
+        .text(`${r.evidence.document?.originalName || 'Document'}${r.evidence.pageNumber ? ` (Page ${r.evidence.pageNumber})` : ''} → "${r.evidence.extractedValue}"`);
     } else {
-      addMuted('No matching evidence found.');
+      doc.font('Helvetica').fontSize(8).fillColor(colors.danger).text('Evidence: No supporting evidence found in submitted documents.');
     }
 
-    doc.moveDown(0.1);
+    // AI Recommendation vs Human Decision
+    doc.font('Helvetica-Bold').fontSize(8).fillColor(colors.textDark).text(`AI Recommendation: `, { continued: true });
+    doc.font('Helvetica').fontSize(8).fillColor(colors.textMuted).text(`${r.status} (${r.reason})`);
 
-    // Reason
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(9)
-      .fillColor(colors.textDark)
-      .text('Decision: ', { continued: true })
-      .font('Helvetica')
-      .fillColor(colors.textDark)
-      .text(result.reason);
+    if (r.reviewedBy) {
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(colors.accent).text(`Final Human Decision: `, { continued: true });
+      doc
+        .font('Helvetica')
+        .fontSize(8)
+        .fillColor(statusColor)
+        .text(`${r.finalStatus} by ${r.reviewedBy}${r.reviewerReason ? ` — Note: ${r.reviewerReason}` : ''}`);
+    }
 
     doc.moveDown(0.5);
-
-    // Separator
-    const sepY = doc.y;
-    doc
-      .moveTo(doc.page.margins.left + 20, sepY)
-      .lineTo(doc.page.margins.left + pageWidth - 20, sepY)
-      .lineWidth(0.3)
-      .strokeColor(colors.border)
-      .stroke();
+    const lineY = doc.y;
+    doc.moveTo(doc.page.margins.left, lineY).lineTo(doc.page.margins.left + pageWidth, lineY).lineWidth(0.3).strokeColor(colors.border).stroke();
     doc.moveDown(0.5);
   }
 
-  // Non-compliant first (most important)
-  if (failures.length > 0) {
-    addSubheader(`4.1 Non-Compliant (${failures.length})`);
-    failures.forEach(renderResult);
+  // ── 5. Audit Trail & Legal Seal ────────────────────
+  ensureSpace(120);
+  addHeader('5. Official Audit Trail & Digital Authentication', 14);
+
+  addBody(`Report Unique Identifier: ${bid.id}`);
+  addBody(`Generated Timestamp: ${new Date().toISOString()}`);
+  addBody(`Platform: GeM Compliance Copilot v2.0 (SIH Special Edition)`);
+
+  if (bid.auditLogs && bid.auditLogs.length > 0) {
+    doc.moveDown(0.3);
+    doc.font('Helvetica-Bold').fontSize(8).fillColor(colors.primary).text('Recent Verified Audit Actions:');
+    bid.auditLogs.forEach((log: any) => {
+      doc
+        .font('Helvetica')
+        .fontSize(7.5)
+        .fillColor(colors.textMuted)
+        .text(`• [${new Date(log.timestamp).toLocaleTimeString('en-IN')}] ${log.action} by ${log.actor}: ${log.notes || 'N/A'}`);
+    });
   }
-
-  // Needs review
-  if (reviews.length > 0) {
-    ensureSpace(40);
-    addSubheader(`4.2 Needs Review (${reviews.length})`);
-    reviews.forEach(renderResult);
-  }
-
-  // Compliant
-  if (passes.length > 0) {
-    ensureSpace(40);
-    addSubheader(`4.3 Compliant (${passes.length})`);
-    passes.forEach(renderResult);
-  }
-
-  // ── Footer: Audit Trail ────────────────────────────
-  doc.addPage();
-  addHeader('5. Audit Trail', 16);
-
-  addBody(`Report ID: ${bid.id}`);
-  addBody(`Bid Title: ${bid.title}`);
-  addBody(`GeM Bid Number: ${bid.gemBidNumber || 'N/A'}`);
-  addBody(`Analysis Status: ${bid.status}`);
-  addBody(`Analysis Created: ${new Date(bid.createdAt).toLocaleString('en-IN')}`);
-  addBody(`Report Generated: ${new Date().toLocaleString('en-IN')}`);
-  addBody(`Documents Processed: ${bid.documents.length}`);
-  addBody(`Requirements Identified: ${bid.requirements.length}`);
-  addBody(`Compliance Results: ${bid.results.length}`);
 
   addDivider();
 
-  addSubheader('Disclaimer');
+  addSubheader('Legal Notice & Officer Certification');
   addMuted(
-    'This report was generated by the GeM Compliance Copilot using a combination of deterministic rule-based evaluation ' +
-    'and AI-powered semantic analysis (Google Gemini). While the system strives for accuracy, all compliance decisions ' +
-    'should be verified by a qualified procurement officer. AI-generated assessments carry confidence scores and should ' +
-    'not be treated as legally binding determinations. Items marked as "NEEDS_REVIEW" require mandatory human verification.'
+    'This compliance audit document provides AI-assisted, evidence-grounded verification for public procurement under GeM Guidelines. ' +
+    'Automated rule calculations and semantic extractions are cited with page-level traceability to prevent hallucinations. ' +
+    'Under GeM General Financial Rules (GFR 2017), final contract awards remain the sole responsibility of the designated Procurement Officer.'
   );
 
-  doc.moveDown(1);
-  addMuted(
-    'This system is designed to assist — not replace — human judgment in government procurement processes.'
-  );
-
-  // Finalize
   doc.end();
   return doc;
 }

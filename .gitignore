@@ -30,8 +30,10 @@ desktop.ini
 *.log
 npm-debug.log*
 
-# Prisma
+# Prisma & Databases
 prisma/migrations/
+*.db
+*.db-journal
 
 # Coverage
 coverage/
